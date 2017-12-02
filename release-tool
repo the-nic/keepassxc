@@ -113,6 +113,7 @@ Options:
                           (default: ${BUILD_PLUGINS})
   -n, --no-source-tarball Don't build source tarball
   --nightly               Perform a nightly build (checkout develop; use nightly cmake var)
+  --clean                 Delete existing release directory before starting
   -h, --help              Show this help
 EOF
     elif [ "sign" == "$cmd" ]; then
@@ -123,8 +124,7 @@ Sign previously compiled release packages
 Options:
   -f, --files        Files to sign (required)
   -g, --gpg-key      GPG key used to sign the files (default: '${GPG_KEY}')
-      --signtool     Specify the signtool executable (default: 'signtool')
-      --signtool-key Provide a key to be used with signtool (for Windows EXE)
+      --signtool-key Provide a pkcs#12 key to be used with osslsigncode (for Windows EXE)
   -h, --help         Show this help
 EOF
     fi
@@ -480,6 +480,8 @@ merge() {
 #                             build command
 # -----------------------------------------------------------------------
 build() {    
+    CLEAN_RELEASE_DIR=false
+
     while [ $# -ge 1 ]; do
         local arg="$1"
         case "$arg" in
@@ -536,6 +538,9 @@ build() {
 
             --nightly)
                 BUILD_NIGHTLY=true ;;
+
+            --clean)
+                CLEAN_RELEASE_DIR=true ;;
             
             -h|--help)
                 printUsage "build"
@@ -564,6 +569,11 @@ build() {
     else
         logInfo "Checking out release tag '${TAG_NAME}'..."
         git checkout "$TAG_NAME"
+    fi
+
+    if [[ $CLEAN_RELEASE_DIR && -d "$OUTPUT_DIR" ]]; then
+        logInfo "Removing existing output directory..."
+        rm -R "$OUTPUT_DIR"
     fi
 
     logInfo "Creating output directory..."
@@ -601,11 +611,11 @@ build() {
     fi
     export CXX="$COMPILER"
     
-    if [ "" == "$DOCKER_IMAGE" ]; then
+    if [ -z "$DOCKER_IMAGE" ]; then
         if [ "$(uname -s)" == "Darwin" ]; then
             # Building on OS X
             local qt_vers="$(ls /usr/local/Cellar/qt5 2> /dev/null | sort -r | head -n1)"
-            if [ "" == "$qt_vers" ]; then
+            if [ -z "$qt_vers" ]; then
                 exitError "Couldn't find Qt5! Please make sure it is available in '/usr/local/Cellar/qt5'."
             fi
             export MACOSX_DEPLOYMENT_TARGET=10.7
@@ -683,7 +693,7 @@ build() {
 # -----------------------------------------------------------------------
 sign() {
     SIGN_FILES=()
-    SIGNTOOL="signtool"
+    SIGNTOOL="osslsigncode"
     SIGNTOOL_KEY=""
     
     while [ $# -ge 1 ]; do
@@ -697,10 +707,6 @@ sign() {
                 
             -g|--gpg-key)
                 GPG_KEY="$2"
-                shift ;;
-
-            --signtool)
-                SIGNTOOL="$2"
                 shift ;;
 
             --signtool-key)
@@ -740,11 +746,14 @@ sign() {
             logInfo "Signing file '${f}' using signtool...\n"
             read -s -p "Signtool Key Password: " password
             echo
-            "${SIGNTOOL}" sign -f "${SIGNTOOL_KEY}" -p ${password} -v -t http://timestamp.comodoca.com/authenticode ${f}
+            # Output a signed exe; we have to use a different name due to osslsigntool limitations
+            "${SIGNTOOL}" sign -pkcs12 "${SIGNTOOL_KEY}" -pass ${password} -t http://timestamp.comodoca.com/authenticode -in ${f} -out ${f}.signed
 
             if [ 0 -ne $? ]; then
                 exitError "Signing failed!"
             fi
+            # Overwrite the original exe with the signed exe
+            mv ${f}.signed ${f}
         fi
         
         logInfo "Signing file '${f}' using release key..."
